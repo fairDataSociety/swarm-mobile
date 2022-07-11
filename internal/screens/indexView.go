@@ -107,7 +107,7 @@ func Make(a fyne.App, w fyne.Window) fyne.CanvasObject {
 			swapEndpoint := i.app.Preferences().String("SwapEndpoint")
 			if swapEndpoint == "" {
 				i.showError(fmt.Errorf("Please provide rpc endpoint"))
-				i.view.Objects[0] = container.NewBorder(nil, nil, nil, nil, i.showRPCView(path, password))
+				i.view.Objects[0] = container.NewBorder(nil, nil, nil, nil, i.showRPCView(path, passwordEntry.Text))
 				return
 			}
 			i.start(path, passwordEntry.Text, swapEndpoint)
@@ -136,6 +136,10 @@ func (i *index) showRPCView(path, password string) fyne.CanvasObject {
 }
 
 func (i *index) start(path, password, rpc string) {
+	if password == "" {
+		i.showError(fmt.Errorf("password cannot be blank"))
+		return
+	}
 	// this runs on testnet
 	mainnet := false
 	err := i.initSwarm(path, path, "welcome from bee-lite", password, rpc, mainnet, logrus.DebugLevel)
@@ -395,16 +399,14 @@ func (i *index) initView() error {
 							file = nil
 						}()
 						if file == nil {
-							dialog.ShowError(fmt.Errorf("please select a file"), i.Window)
+							i.showError(fmt.Errorf("please select a file"))
 							return
 						}
-						stamps := i.b.GetAllBatches()
-						if len(stamps) == 0 {
-							dialog.ShowError(fmt.Errorf("no stamp found"), i.Window)
+						batch := i.app.Preferences().String("batch")
+						if batch == "" {
+							i.showError(fmt.Errorf("please select a batch of stamp"))
 							return
 						}
-
-						batch := hex.EncodeToString(stamps[2].ID())
 						i.progress = dialog.NewProgressInfinite("",
 							fmt.Sprintf("Uploading %s", path.Text), i)
 						i.progress.Show()
@@ -461,43 +463,85 @@ func (i *index) initView() error {
 					i.Window.Clipboard().SetContent(i.b.Addr().String())
 				})
 				addr := container.NewHBox(
-					widget.NewLabel("Eth addr"),
+					widget.NewLabel("Addr"),
 					widget.NewLabel(shortenHashOrAddress(i.b.Addr().String())),
 					addrCopyButton,
 				)
+
+				// chequebook section
+				chequebookHeader := widget.NewLabel("Chequebook")
+				chequebookBalance, err := i.b.ChequebookBalance()
+				if err != nil {
+					dialog.ShowError(err, i.Window)
+					return
+				}
+				withdrawButton := widget.NewButton("Withdraw", func() {})
+				withdrawButton.OnTapped = func() {
+					amount := big.NewInt(1000000000000000)
+					if chequebookBalance.Cmp(amount) < 0 {
+						dialog.ShowError(fmt.Errorf("not enough balance on chequebook"), i.Window)
+						return
+					}
+					i.showProgressWithMessage(fmt.Sprintf("withdrawing %s from chequebook", amount.String()))
+					tx, err := i.b.ChequebookWithdraw(amount)
+					if err != nil {
+						i.hideProgress()
+						dialog.ShowError(err, i.Window)
+						return
+					}
+					i.hideProgress()
+					d := dialog.NewCustomConfirm("Withdrawal successful", "Ok", "Cancel", i.refDialog(tx.String()), func(b bool) {}, i.Window)
+					d.Show()
+				}
+				chequebookContent := container.NewVBox(container.NewHBox(chequebookHeader, withdrawButton), widget.NewLabel(fmt.Sprintf("Balance: %s", chequebookBalance.String())))
 				// stamps section
 				buyButton := widget.NewButton("Buy", func() {})
 				stampsHeader := container.NewHBox(widget.NewLabel("Postage stamps"), buyButton)
 				stamps := i.b.GetAllBatches()
-				stampsContent := container.NewVBox(stampsHeader)
+
+				selectedStamp := i.app.Preferences().String("selected_stamp")
+				stampsList := []string{}
 				for _, v := range stamps {
-					stamp := hex.EncodeToString(v.ID())
-					stampCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-						i.Window.Clipboard().SetContent(stamp)
-					})
-					stampsContent.Add(container.NewHBox(widget.NewLabel(shortenHashOrAddress(stamp)), stampCopyButton))
+					stampsList = append(stampsList, shortenHashOrAddress(hex.EncodeToString(v.ID())))
 				}
+				radio := widget.NewRadioGroup(stampsList, func(s string) {
+					if s == "" {
+						return
+					}
+					for _, v := range stamps {
+						stamp := hex.EncodeToString(v.ID())
+						if s[0:6] == stamp[0:6] {
+							i.app.Preferences().SetString("selected_stamp", s)
+							i.app.Preferences().SetString("batch", stamp)
+						}
+					}
+				})
+				radio.SetSelected(selectedStamp)
+				stampsContent := container.NewVBox(stampsHeader, radio)
+
 				buyButton.OnTapped = func() {
-					depthStr := "18"
-					amountStr := "100000"
+					depthStr := "22"
+					amountStr := "100000000"
 					d := dialog.NewCustomConfirm("Buy Stamp", "Ok", "Cancel", i.buyBatchDialog(&depthStr, &amountStr), func(b bool) {
 						if b {
 							amount, ok := big.NewInt(0).SetString(amountStr, 10)
 							if !ok {
-								dialog.ShowError(fmt.Errorf("invalid amountStr"), i.Window)
+								i.showError(fmt.Errorf("invalid amountStr"))
 								return
 							}
-
 							depth, err := strconv.ParseUint(depthStr, 10, 8)
 							if err != nil {
-								dialog.ShowError(fmt.Errorf("invalid depthStr"), i.Window)
+								i.showError(fmt.Errorf("invalid depthStr %s", err.Error()))
 								return
 							}
+							i.showProgressWithMessage("buying stamp")
 							id, err := i.b.BuyStamp(amount, depth, "", false)
 							if err != nil {
+								i.hideProgress()
 								i.showError(err)
 								return
 							}
+							i.hideProgress()
 							stamp := hex.EncodeToString(id)
 							stampCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 								i.Window.Clipboard().SetContent(stamp)
@@ -509,7 +553,7 @@ func (i *index) initView() error {
 					}, i.Window)
 					d.Show()
 				}
-				content := container.NewGridWithColumns(1, container.NewVBox(addr, stampsContent))
+				content := container.NewGridWithColumns(1, container.NewVBox(addr, chequebookContent, stampsContent))
 				i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, content)
 			}
 		}),
@@ -542,7 +586,7 @@ func (i *index) buyBatchDialog(depthStr, amountStr *string) fyne.CanvasObject {
 	depthSlider := widget.NewSlider(float64(18), float64(30))
 	depthSlider.Step = 2.0
 	depthSlider.OnChanged = func(f float64) {
-		depthBind.Set(fmt.Sprintf("%f", f))
+		depthBind.Set(fmt.Sprintf("%d", int64(f)))
 	}
 
 	optionsForm := widget.NewForm()
