@@ -4,12 +4,11 @@ go 1.17
 
 require (
 	fyne.io/fyne/v2 v2.1.4
+	github.com/ethereum/go-ethereum v1.10.18
 	github.com/ethersphere/bee v1.6.1
-	github.com/onepeerlabs/bee-lite v0.0.0
+	github.com/onepeerlabs/bee-lite v0.0.0-20220711104214-232a99f9ed11
 	github.com/sirupsen/logrus v1.8.1
 )
-
-replace github.com/onepeerlabs/bee-lite => ../../onepeerlabs/bee-lite
 
 require (
 	github.com/Knetic/govaluate v3.0.1-0.20171022003610-9aa49832a739+incompatible // indirect
@@ -24,13 +23,10 @@ require (
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
 	github.com/deckarep/golang-set v1.8.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
-	github.com/ethereum/go-ethereum v1.10.18 // indirect
-	github.com/ethersphere/bmt v0.1.4 // indirect
 	github.com/ethersphere/go-price-oracle-abi v0.1.0 // indirect
 	github.com/ethersphere/go-storage-incentives-abi v0.3.0 // indirect
 	github.com/ethersphere/go-sw3-abi v0.4.0 // indirect
 	github.com/ethersphere/langos v1.0.0 // indirect
-	github.com/fairdatasociety/fairOS-dfs v0.8.1 // indirect
 	github.com/flynn/noise v1.0.0 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
 	github.com/fredbi/uri v0.0.0-20181227131451-3dcfdacbaaf3 // indirect
