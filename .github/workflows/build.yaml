@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [linux, windows, android, ios, darwin]
+        os: [linux, windows, android]
     steps:
       - uses: actions/checkout@v2
       - name: Set up Go
