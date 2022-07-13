@@ -106,7 +106,6 @@ func Make(a fyne.App, w fyne.Window) fyne.CanvasObject {
 			}
 			swapEndpoint := i.app.Preferences().String("SwapEndpoint")
 			if swapEndpoint == "" {
-				i.showError(fmt.Errorf("Please provide rpc endpoint"))
 				i.view.Objects[0] = container.NewBorder(nil, nil, nil, nil, i.showRPCView(path, passwordEntry.Text))
 				return
 			}
@@ -140,9 +139,11 @@ func (i *index) start(path, password, rpc string) {
 		i.showError(fmt.Errorf("password cannot be blank"))
 		return
 	}
+	i.showProgressWithMessage("Starting Bee")
 	// this runs on testnet
 	mainnet := false
 	err := i.initSwarm(path, path, "welcome from bee-lite", password, rpc, mainnet, logrus.DebugLevel)
+	i.hideProgress()
 	if err != nil {
 		addr, addrErr := bee.OverlayAddr(path, password)
 		if addrErr != nil {
@@ -208,35 +209,13 @@ func (i *index) initSwarm(keystore, dataDir, welcomeMessage, password, swapEndpo
 	if chainID.Int64() != o.ChainID {
 		return fmt.Errorf("rpc endpoint point to wrong chain")
 	}
-	var (
-		wg sync.WaitGroup
-	)
-	ch, beeCh, errCh := bee.Start(o, password)
-	i.showProgressWithMessage("Starting Bee")
-	wg.Add(1)
-	go func() {
-		defer func() {
-			wg.Done()
-			i.hideProgress()
-		}()
-	ready:
-		for {
-			select {
-			case evt := <-ch:
-				if evt == bee.Ready {
-					// set password
-					i.app.Preferences().SetString("password", password)
-					i.b = <-beeCh
-					break ready
-				}
-			case err = <-errCh:
-				i.progress.Hide()
-				return
-			}
-		}
-		i.progress.Hide()
-	}()
-	wg.Wait()
+
+	b, err := bee.Start(o, password)
+	if err != nil {
+		return err
+	}
+	i.app.Preferences().SetString("password", password)
+	i.b = b
 	return err
 }
 

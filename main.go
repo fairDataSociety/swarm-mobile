@@ -8,7 +8,8 @@ import (
 
 func main() {
 	a := app.NewWithID("com.plur.beemobile")
-	w := a.NewWindow("SwarmMobile")
+
+	w := a.NewWindow("Swarm Mobile")
 	w.SetMaster()
 
 	w.Resize(fyne.NewSize(390, 422))
