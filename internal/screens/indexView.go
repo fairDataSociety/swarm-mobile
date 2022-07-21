@@ -54,16 +54,23 @@ func (*logger) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func (*logger) Log(s string) {
+	log.Println(s)
+}
+
 type index struct {
 	fyne.Window
 
 	app          fyne.App
 	view         *fyne.Container
 	content      *fyne.Container
+	title        *widget.Label
+	intro        *widget.Label
 	progress     dialog.Dialog
 	activeWindow string
 	mtx          sync.Mutex
 	b            *bee.Bee
+	logger       *logger
 }
 
 type uploadedItem struct {
@@ -78,60 +85,82 @@ func Make(a fyne.App, w fyne.Window) fyne.CanvasObject {
 	i := &index{
 		Window: w,
 		app:    a,
+		logger: &logger{},
 	}
 	path := a.Storage().RootURI().Path()
-	// check if password is set
-	password := i.app.Preferences().String("password")
-	if password != "" {
-		swapEndpoint := i.app.Preferences().String("SwapEndpoint")
-		if swapEndpoint == "" {
-			i.view = container.NewBorder(nil, nil, nil, nil, i.showRPCView(path, password))
-			return i.view
+	i.title = widget.NewLabel("Swarm")
+	i.intro = widget.NewLabel("Initialise your swarm node with a strong password")
+	i.intro.Wrapping = fyne.TextWrapWord
+	content := container.NewMax()
+
+	// check if password and endpoint is set
+	savedPassword := i.app.Preferences().String("password")
+	savedSwapEndpoint := i.app.Preferences().String("SwapEndpoint")
+	if savedPassword != "" && savedSwapEndpoint != "" {
+		go i.start(path, savedPassword, savedSwapEndpoint)
+		content.Objects = []fyne.CanvasObject{
+			container.NewBorder(
+				widget.NewLabel(""),
+				widget.NewLabel(""),
+				widget.NewLabel(""),
+				widget.NewLabel(""),
+				widget.NewLabel("Please wait..."),
+			),
 		}
-		go i.start(path, password, swapEndpoint)
-		blankView := container.NewBorder(widget.NewLabel(""), widget.NewLabel(""), widget.NewLabel(""), widget.NewLabel(""), widget.NewLabel("Please wait..."))
-		i.view = container.NewBorder(nil, nil, nil, nil, blankView)
+		i.content = content
+		i.view = container.NewBorder(container.NewVBox(i.title, widget.NewSeparator(), i.intro), nil, nil, nil, content)
 		return i.view
 	}
+
 	passwordEntry := widget.NewPasswordEntry()
 	passwordEntry.SetPlaceHolder("Password")
-	form := &widget.Form{
-		Items: []*widget.FormItem{
-			{Text: "Password", Widget: passwordEntry, HintText: "Password"},
-		},
-		OnSubmit: func() {
-			if passwordEntry.Text == "" {
-				i.showError(fmt.Errorf("passwordEntry cannot be blank"))
-				return
-			}
-			swapEndpoint := i.app.Preferences().String("SwapEndpoint")
-			if swapEndpoint == "" {
-				i.view.Objects[0] = container.NewBorder(nil, nil, nil, nil, i.showRPCView(path, passwordEntry.Text))
-				return
-			}
-			i.start(path, passwordEntry.Text, swapEndpoint)
-		},
-	}
-	i.view = container.NewBorder(nil, nil, nil, nil, form)
+	startButton := widget.NewButton("Next", func() {
+		if passwordEntry.Text == "" {
+			i.showError(fmt.Errorf("password cannot be blank"))
+			return
+		}
+		i.intro.SetText("Swarm mobile needs a rpc endpoint to start")
+		content.Objects = []fyne.CanvasObject{i.showRPCView(path, passwordEntry.Text)}
+		content.Refresh()
+		return
+	})
+	startButton.Importance = widget.HighImportance
+	content.Objects = []fyne.CanvasObject{container.NewBorder(passwordEntry, startButton, nil, nil)}
+	i.content = content
+	i.view = container.NewBorder(
+		container.NewVBox(i.title, widget.NewSeparator(), i.intro), nil, nil, nil, content)
 	return i.view
 }
 
 func (i *index) showRPCView(path, password string) fyne.CanvasObject {
 	rpcEntry := widget.NewEntry()
-	rpcEntry.SetPlaceHolder("RPC")
-	form := &widget.Form{
-		Items: []*widget.FormItem{
-			{Text: "RPC Endpoint", Widget: rpcEntry, HintText: "RPC Endpoint"},
-		},
-		OnSubmit: func() {
-			if rpcEntry.Text == "" {
-				i.showError(fmt.Errorf("rpc endpoint cannot be blank"))
-				return
-			}
-			i.start(path, password, rpcEntry.Text)
-		},
-	}
-	return form
+	rpcEntry.SetPlaceHolder("RPC Endpoint")
+
+	startButton := widget.NewButton("Start", func() {
+		if rpcEntry.Text == "" {
+			i.showError(fmt.Errorf("rpc endpoint cannot be blank"))
+			return
+		}
+		// test endpoint is connectable
+		eth, err := ethclient.Dial(rpcEntry.Text)
+		if err != nil {
+			i.logger.Log(fmt.Sprintf("rpc endpoint: %s", err.Error()))
+			i.showError(fmt.Errorf("rpc endpoint is invalid or not reachable"))
+			return
+		}
+
+		// check connection
+		_, err = eth.ChainID(context.Background())
+		if err != nil {
+			i.logger.Log(fmt.Sprintf("rpc endpoint: %s", err.Error()))
+			i.showError(fmt.Errorf("rpc endpoint: %s", err.Error()))
+			return
+		}
+		i.start(path, password, rpcEntry.Text)
+	})
+	startButton.Importance = widget.HighImportance
+
+	return container.NewBorder(rpcEntry, startButton, nil, nil)
 }
 
 func (i *index) start(path, password, rpc string) {
@@ -142,7 +171,7 @@ func (i *index) start(path, password, rpc string) {
 	i.showProgressWithMessage("Starting Bee")
 	// this runs on testnet
 	mainnet := false
-	err := i.initSwarm(path, path, "welcome from bee-lite", password, rpc, mainnet, logrus.DebugLevel)
+	err := i.initSwarm(path, path, "welcome from bee-lite", password, rpc, mainnet, logrus.ErrorLevel)
 	i.hideProgress()
 	if err != nil {
 		addr, addrErr := bee.OverlayAddr(path, password)
@@ -155,30 +184,20 @@ func (i *index) start(path, password, rpc string) {
 	}
 
 	i.app.Preferences().SetString("SwapEndpoint", rpc)
-	err = i.initView()
+	err = i.loadView()
 	if err != nil {
 		i.showError(err)
 		return
 	}
+	i.intro.SetText("")
 }
 
 func (i *index) initSwarm(keystore, dataDir, welcomeMessage, password, swapEndpoint string, mainnet bool, logLevel logrus.Level) error {
-	// check rpc endpoint & chainID
-	eth, err := ethclient.Dial(swapEndpoint)
-	if err != nil {
-		return err
-	}
-
-	// check connection
-	chainID, err := eth.ChainID(context.Background())
-	if err != nil {
-		return err
-	}
 	o := &bee.Options{
 		FullNodeMode:             true,
 		Keystore:                 keystore,
 		DataDir:                  dataDir,
-		Addr:                     ":1836",
+		Addr:                     ":6969",
 		WelcomeMessage:           welcomeMessage,
 		Bootnodes:                TestnetBootnodes,
 		Logger:                   logging.New(&logger{}, logLevel),
@@ -206,9 +225,6 @@ func (i *index) initSwarm(keystore, dataDir, welcomeMessage, password, swapEndpo
 		o.Mainnet = mainnet
 		o.Bootnodes = MainnetBootnodes
 	}
-	if chainID.Int64() != o.ChainID {
-		return fmt.Errorf("rpc endpoint point to wrong chain")
-	}
 
 	b, err := bee.Start(o, password)
 	if err != nil {
@@ -219,339 +235,268 @@ func (i *index) initSwarm(keystore, dataDir, welcomeMessage, password, swapEndpo
 	return err
 }
 
-func (i *index) initView() error {
-	peerCountBinding := binding.NewString()
-	peerCountBinding.Set("0")
-	connectionBinding := binding.NewString()
-	connectionBinding.Set("You are connected")
-	populationBinding := binding.NewString()
-	populationBinding.Set("0")
+func (i *index) loadView() error {
+	addrCopyButton := widget.NewButtonWithIcon("   Copy   ", theme.ContentCopyIcon(), func() {
+		i.Window.Clipboard().SetContent(i.b.Addr().String())
+	})
+	addrHeader := container.NewHBox(widget.NewLabel("Overlay address :"))
+	addr := container.NewHBox(
+		widget.NewLabel(shortenHashOrAddress(i.b.Addr().String())),
+		addrCopyButton,
+	)
+	addrContent := container.NewVBox(addrHeader, addr)
 
+	stampsHeader := container.NewHBox(widget.NewLabel("Postage stamps :"))
+	stampsContent := container.NewVBox()
+	stamps := i.b.GetAllBatches()
+	radio := widget.NewRadioGroup([]string{}, func(s string) {
+		if s == "" {
+			i.app.Preferences().SetString("selected_stamp", "")
+			i.app.Preferences().SetString("batch", "")
+			return
+		}
+		batches := i.b.GetAllBatches()
+		for _, v := range batches {
+			stamp := hex.EncodeToString(v.ID())
+			if s[0:6] == stamp[0:6] {
+				i.app.Preferences().SetString("selected_stamp", s)
+				i.app.Preferences().SetString("batch", stamp)
+			}
+		}
+	})
+	if len(stamps) == 0 {
+		// withdraw
+		chequebookBalance, err := i.b.ChequebookBalance()
+		if err != nil {
+			i.showError(err)
+			return err
+		}
+		i.showProgressWithMessage(fmt.Sprintf("withdrawing %s from chequebook", chequebookBalance.String()))
+		tx, err := i.b.ChequebookWithdraw(chequebookBalance)
+		if err != nil {
+			i.hideProgress()
+			i.showError(err)
+			return err
+		}
+		i.logger.Log(fmt.Sprintf("chequebook withdraw transaction : %s", tx.String()))
+		i.hideProgress()
+		i.showProgressWithMessage("buying stamp")
+
+		// just stand by
+		<-time.After(time.Second * 30)
+
+		// buy stamp
+		depthStr := "22"
+		amountStr := "100000000"
+		amount, ok := big.NewInt(0).SetString(amountStr, 10)
+		if !ok {
+			i.showError(fmt.Errorf("invalid amountStr"))
+			return fmt.Errorf("invalid amountStr")
+		}
+		depth, err := strconv.ParseUint(depthStr, 10, 8)
+		if err != nil {
+			i.showError(fmt.Errorf("invalid depthStr %s", err.Error()))
+			return err
+		}
+
+		id, err := i.b.BuyStamp(amount, depth, "", false)
+		if err != nil {
+			i.hideProgress()
+			i.showError(err)
+			return err
+		}
+		i.hideProgress()
+		radio.Append(shortenHashOrAddress(hex.EncodeToString(id)))
+	} else {
+		selectedStamp := i.app.Preferences().String("selected_stamp")
+		for _, v := range stamps {
+			radio.Append(shortenHashOrAddress(hex.EncodeToString(v.ID())))
+		}
+
+		radio.SetSelected(selectedStamp)
+	}
+	stampsContent = container.NewVBox(stampsHeader, radio)
+
+	infoCard := widget.NewCard("Info", fmt.Sprintf("connected with %d peers", i.b.Topology().Connected), container.NewVBox(addrContent, stampsContent))
 	go func() {
 		// auto reload
 		for {
 			select {
 			case <-time.After(time.Second * 5):
-				if i.activeWindow == "home" && i.b != nil {
-					peerCountBinding.Set(fmt.Sprintf("%d", i.b.Topology().Connected))
-					populationBinding.Set(fmt.Sprintf("%d", i.b.Topology().Population))
+				if i.b != nil {
+					infoCard.SetSubTitle(fmt.Sprintf("connected with %d peers", i.b.Topology().Connected))
 				}
 			}
 		}
 	}()
-	toolbar := widget.NewToolbar(
-		widget.NewToolbarAction(theme.HomeIcon(), func() {
-			if i.activeWindow != "home" {
-				i.mtx.Lock()
-				i.activeWindow = "home"
-				i.mtx.Unlock()
-
-				peerCountBinding.Set(fmt.Sprintf("%d", i.b.Topology().Connected))
-				populationBinding.Set(fmt.Sprintf("%d", i.b.Topology().Population))
-				connection := container.NewHBox(widget.NewLabel("Status : "), widget.NewLabelWithData(connectionBinding))
-				peers := container.NewHBox(widget.NewLabel("Peers : "), widget.NewLabelWithData(peerCountBinding))
-				population := container.NewHBox(widget.NewLabel("Population : "), widget.NewLabelWithData(populationBinding))
-				content := container.NewGridWithColumns(1, container.NewVBox(connection, peers, population))
-				i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, content)
+	filepath := ""
+	mimetype := ""
+	var pathBind = binding.BindString(&filepath)
+	path := widget.NewEntry()
+	path.Bind(pathBind)
+	path.Disable()
+	var file io.Reader
+	openFile := widget.NewButton("File Open", func() {
+		fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+			if err != nil {
+				i.showError(err)
+				return
 			}
-		}),
-		widget.NewToolbarSpacer(),
-		widget.NewToolbarAction(theme.FileIcon(), func() {
-			if i.activeWindow != "file" {
-				i.mtx.Lock()
-				i.activeWindow = "file"
-				i.mtx.Unlock()
-
-				uploadHeader := widget.NewLabel("Uploaded content")
-				uploadedContent := container.NewVBox(uploadHeader)
-				uploadedContentWrapper := container.NewScroll(uploadedContent)
-				uploadedSrt := i.app.Preferences().String("uploads")
-				uploads := []uploadedItem{}
-				if uploadedSrt != "" {
-					err := json.Unmarshal([]byte(uploadedSrt), &uploads)
-					if err != nil {
-						i.showError(err)
-					}
-					for _, v := range uploads {
-						ref := v.Reference
-						name := v.Name
-						label := widget.NewLabel(name)
-						label.Wrapping = fyne.TextWrapWord
-						item := container.NewBorder(label, nil, nil, widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-							i.Window.Clipboard().SetContent(ref)
-						}))
-						uploadedContent.Add(item)
-					}
-				}
-
-				hash := widget.NewEntry()
-				hash.SetPlaceHolder("Swarm Hash")
-				dlForm := &widget.Form{
-					Items: []*widget.FormItem{
-						{Text: "Swarm Hash", Widget: hash, HintText: "Swarm Hash"},
-					},
-					OnSubmit: func() {
-						dlAddr, err := swarm.ParseHexAddress(hash.Text)
-						if err != nil {
-							i.showError(err)
-							return
-						}
-						go func() {
-							i.progress = dialog.NewProgressInfinite("",
-								fmt.Sprintf("Downloading %s", shortenHashOrAddress(hash.Text)), i)
-							i.progress.Show()
-							r, fileName, err := i.b.GetBzz(context.Background(), dlAddr)
-							if err != nil {
-								i.progress.Hide()
-								i.showError(err)
-								return
-							}
-							hash.Text = ""
-							data, err := ioutil.ReadAll(r)
-							if err != nil {
-								i.progress.Hide()
-								i.showError(err)
-								return
-							}
-							i.progress.Hide()
-							saveFile := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
-								if err != nil {
-									i.showError(err)
-									return
-								}
-								if writer == nil {
-									return
-								}
-								_, err = writer.Write(data)
-								if err != nil {
-									i.showError(err)
-									return
-								}
-								writer.Close()
-							}, i.Window)
-							saveFile.SetFileName(fileName)
-							saveFile.Show()
-						}()
-
-					},
-				}
-				filepath := ""
-				mimetype := ""
-				var pathBind = binding.BindString(&filepath)
-				path := widget.NewEntry()
-				path.Bind(pathBind)
-				path.Disable()
-				var file io.Reader
-				openFile := widget.NewButton("File Open", func() {
-					fd := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-						if err != nil {
-							i.showError(err)
-							return
-						}
-						if reader == nil {
-							return
-						}
-						defer reader.Close()
-						data, err := ioutil.ReadAll(reader)
-						if err != nil {
-							i.showError(err)
-							return
-						}
-
-						mimetype = reader.URI().MimeType()
-						pathBind.Set(reader.URI().Name())
-						file = bytes.NewReader(data)
-						data = nil
-					}, i.Window)
-					fd.Show()
-				})
-				upForm := &widget.Form{
-					Items: []*widget.FormItem{
-						{Text: "Add file", Widget: path, HintText: "Filepath"},
-						{Text: "Choose File", Widget: openFile},
-					},
-				}
-				upForm.OnSubmit = func() {
-					go func() {
-						defer func() {
-							pathBind.Set("")
-							file = nil
-						}()
-						if file == nil {
-							i.showError(fmt.Errorf("please select a file"))
-							return
-						}
-						batch := i.app.Preferences().String("batch")
-						if batch == "" {
-							i.showError(fmt.Errorf("please select a batch of stamp"))
-							return
-						}
-						i.progress = dialog.NewProgressInfinite("",
-							fmt.Sprintf("Uploading %s", path.Text), i)
-						i.progress.Show()
-
-						ref, err := i.b.AddFileBzz(context.Background(), batch, path.Text, mimetype, file)
-						if err != nil {
-							i.progress.Hide()
-							i.showError(err)
-							return
-						}
-						d := dialog.NewCustomConfirm("Upload successful", "Ok", "Cancel", i.refDialog(ref.String()), func(b bool) {}, i.Window)
-						i.progress.Hide()
-						d.Show()
-						filename := path.Text
-						uploads = append(uploads, uploadedItem{
-							Name:      filename,
-							Reference: ref.String(),
-						})
-						data, err := json.Marshal(uploads)
-						if err != nil {
-							i.progress.Hide()
-							i.showError(err)
-							return
-						}
-						i.app.Preferences().SetString("uploads", string(data))
-						label := widget.NewLabel(filename)
-						label.Wrapping = fyne.TextWrapWord
-						refCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-							i.Window.Clipboard().SetContent(ref.String())
-						})
-						item := container.NewBorder(label, nil, nil, refCopyButton)
-						uploadedContent.Add(item)
-						tabs := container.NewAppTabs(
-							container.NewTabItemWithIcon("Upload", theme.UploadIcon(), container.NewBorder(upForm, nil, nil, nil, uploadedContentWrapper)),
-							container.NewTabItemWithIcon("Download", theme.DownloadIcon(), container.NewVBox(dlForm)),
-						)
-						i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, container.NewBorder(nil, nil, nil, nil, tabs))
-					}()
-				}
-				tabs := container.NewAppTabs(
-					container.NewTabItemWithIcon("Upload", theme.UploadIcon(), container.NewBorder(upForm, nil, nil, nil, uploadedContentWrapper)),
-					container.NewTabItemWithIcon("Download", theme.DownloadIcon(), container.NewVBox(dlForm)),
-				)
-				i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, container.NewBorder(nil, nil, nil, nil, tabs))
+			if reader == nil {
+				return
 			}
-		}),
-		widget.NewToolbarSpacer(),
-		widget.NewToolbarAction(theme.AccountIcon(), func() {
-			if i.activeWindow != "accounts" {
-				i.mtx.Lock()
-				i.activeWindow = "accounts"
-				i.mtx.Unlock()
-				addrCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-					i.Window.Clipboard().SetContent(i.b.Addr().String())
-				})
-				addr := container.NewHBox(
-					widget.NewLabel("Addr"),
-					widget.NewLabel(shortenHashOrAddress(i.b.Addr().String())),
-					addrCopyButton,
-				)
+			defer reader.Close()
+			data, err := ioutil.ReadAll(reader)
+			if err != nil {
+				i.showError(err)
+				return
+			}
 
-				// chequebook section
-				chequebookHeader := widget.NewLabel("Chequebook")
-				chequebookBalance, err := i.b.ChequebookBalance()
+			mimetype = reader.URI().MimeType()
+			pathBind.Set(reader.URI().Name())
+			file = bytes.NewReader(data)
+			data = nil
+		}, i.Window)
+		fd.Show()
+	})
+	upForm := &widget.Form{
+		Items: []*widget.FormItem{
+			{Text: "Add file", Widget: path, HintText: "Filepath"},
+			{Text: "Choose File", Widget: openFile},
+		},
+	}
+	upForm.OnSubmit = func() {
+		go func() {
+			defer func() {
+				pathBind.Set("")
+				file = nil
+			}()
+			if file == nil {
+				i.showError(fmt.Errorf("please select a file"))
+				return
+			}
+			batch := i.app.Preferences().String("batch")
+			if batch == "" {
+				i.showError(fmt.Errorf("please select a batch of stamp"))
+				return
+			}
+			i.progress = dialog.NewProgressInfinite("",
+				fmt.Sprintf("Uploading %s", path.Text), i)
+			i.progress.Show()
+
+			ref, err := i.b.AddFileBzz(context.Background(), batch, path.Text, mimetype, file)
+			if err != nil {
+				i.progress.Hide()
+				i.showError(err)
+				return
+			}
+			filename := path.Text
+			uploadedSrt := i.app.Preferences().String("uploads")
+			uploads := []uploadedItem{}
+			if uploadedSrt != "" {
+				err := json.Unmarshal([]byte(uploadedSrt), &uploads)
 				if err != nil {
-					dialog.ShowError(err, i.Window)
+					i.showError(err)
+				}
+			}
+			uploads = append(uploads, uploadedItem{
+				Name:      filename,
+				Reference: ref.String(),
+			})
+			data, err := json.Marshal(uploads)
+			if err != nil {
+				i.progress.Hide()
+				i.showError(err)
+				return
+			}
+			i.app.Preferences().SetString("uploads", string(data))
+			d := dialog.NewCustomConfirm("Upload successful", "Ok", "Cancel", i.refDialog(ref.String()), func(b bool) {}, i.Window)
+			i.progress.Hide()
+			d.Show()
+		}()
+	}
+	listButton := widget.NewButton("All Uploads", func() {
+		uploadedContent := container.NewVBox()
+		uploadedContentWrapper := container.NewScroll(uploadedContent)
+		uploadedSrt := i.app.Preferences().String("uploads")
+		uploads := []uploadedItem{}
+		if uploadedSrt != "" {
+			err := json.Unmarshal([]byte(uploadedSrt), &uploads)
+			if err != nil {
+				i.showError(err)
+			}
+			for _, v := range uploads {
+				ref := v.Reference
+				name := v.Name
+				label := widget.NewLabel(name)
+				label.Wrapping = fyne.TextWrapWord
+				item := container.NewBorder(label, nil, nil, widget.NewButtonWithIcon("Copy", theme.ContentCopyIcon(), func() {
+					i.Window.Clipboard().SetContent(ref)
+				}))
+				uploadedContent.Add(item)
+			}
+		}
+		child := i.app.NewWindow("Uploaded content")
+		child.FixedSize()
+		child.SetContent(uploadedContentWrapper)
+		child.Show()
+	})
+	uploadCard := widget.NewCard("Upload", "upload content into swarm", container.NewVBox(upForm, listButton))
+
+	hash := widget.NewEntry()
+	hash.SetPlaceHolder("Swarm Hash")
+	dlForm := &widget.Form{
+		Items: []*widget.FormItem{
+			{Text: "Swarm Hash", Widget: hash, HintText: "Swarm Hash"},
+		},
+		OnSubmit: func() {
+			dlAddr, err := swarm.ParseHexAddress(hash.Text)
+			if err != nil {
+				i.showError(err)
+				return
+			}
+			go func() {
+				i.progress = dialog.NewProgressInfinite("",
+					fmt.Sprintf("Downloading %s", shortenHashOrAddress(hash.Text)), i)
+				i.progress.Show()
+				r, fileName, err := i.b.GetBzz(context.Background(), dlAddr)
+				if err != nil {
+					i.progress.Hide()
+					i.showError(err)
 					return
 				}
-				withdrawButton := widget.NewButton("Withdraw", func() {})
-				withdrawButton.OnTapped = func() {
-					amount := big.NewInt(1000000000000000)
-					if chequebookBalance.Cmp(amount) < 0 {
-						dialog.ShowError(fmt.Errorf("not enough balance on chequebook"), i.Window)
-						return
-					}
-					i.showProgressWithMessage(fmt.Sprintf("withdrawing %s from chequebook", amount.String()))
-					tx, err := i.b.ChequebookWithdraw(amount)
+				hash.Text = ""
+				data, err := ioutil.ReadAll(r)
+				if err != nil {
+					i.progress.Hide()
+					i.showError(err)
+					return
+				}
+				i.progress.Hide()
+				saveFile := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 					if err != nil {
-						i.hideProgress()
-						dialog.ShowError(err, i.Window)
+						i.showError(err)
 						return
 					}
-					i.hideProgress()
-					d := dialog.NewCustomConfirm("Withdrawal successful", "Ok", "Cancel", i.refDialog(tx.String()), func(b bool) {}, i.Window)
-					d.Show()
-				}
-				chequebookContent := container.NewVBox(container.NewHBox(chequebookHeader, withdrawButton), widget.NewLabel(fmt.Sprintf("Balance: %s", chequebookBalance.String())))
-				// stamps section
-				buyButton := widget.NewButton("Buy", func() {})
-				stampsHeader := container.NewHBox(widget.NewLabel("Postage stamps"), buyButton)
-				stamps := i.b.GetAllBatches()
-
-				selectedStamp := i.app.Preferences().String("selected_stamp")
-				stampsList := []string{}
-				for _, v := range stamps {
-					stampsList = append(stampsList, shortenHashOrAddress(hex.EncodeToString(v.ID())))
-				}
-				radio := widget.NewRadioGroup(stampsList, func(s string) {
-					if s == "" {
+					if writer == nil {
 						return
 					}
-					for _, v := range stamps {
-						stamp := hex.EncodeToString(v.ID())
-						if s[0:6] == stamp[0:6] {
-							i.app.Preferences().SetString("selected_stamp", s)
-							i.app.Preferences().SetString("batch", stamp)
-						}
+					_, err = writer.Write(data)
+					if err != nil {
+						i.showError(err)
+						return
 					}
-				})
-				radio.SetSelected(selectedStamp)
-				stampsContent := container.NewVBox(stampsHeader, radio)
+					writer.Close()
+				}, i.Window)
+				saveFile.SetFileName(fileName)
+				saveFile.Show()
+			}()
 
-				buyButton.OnTapped = func() {
-					depthStr := "22"
-					amountStr := "100000000"
-					d := dialog.NewCustomConfirm("Buy Stamp", "Ok", "Cancel", i.buyBatchDialog(&depthStr, &amountStr), func(b bool) {
-						if b {
-							amount, ok := big.NewInt(0).SetString(amountStr, 10)
-							if !ok {
-								i.showError(fmt.Errorf("invalid amountStr"))
-								return
-							}
-							depth, err := strconv.ParseUint(depthStr, 10, 8)
-							if err != nil {
-								i.showError(fmt.Errorf("invalid depthStr %s", err.Error()))
-								return
-							}
-							i.showProgressWithMessage("buying stamp")
-							id, err := i.b.BuyStamp(amount, depth, "", false)
-							if err != nil {
-								i.hideProgress()
-								i.showError(err)
-								return
-							}
-							i.hideProgress()
-							stamp := hex.EncodeToString(id)
-							stampCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
-								i.Window.Clipboard().SetContent(stamp)
-							})
-							stampsContent.Add(container.NewVBox(widget.NewLabel(shortenHashOrAddress(stamp)), stampCopyButton))
-							content := container.NewGridWithColumns(1, container.NewVBox(addr, stampsContent))
-							i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, content)
-						}
-					}, i.Window)
-					d.Show()
-				}
-				content := container.NewGridWithColumns(1, container.NewVBox(addr, chequebookContent, stampsContent))
-				i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, content)
-			}
-		}),
-		widget.NewToolbarSpacer(),
-		widget.NewToolbarAction(theme.SettingsIcon(), func() {
-			if i.activeWindow != "settings" {
-				i.mtx.Lock()
-				i.activeWindow = "settings"
-				i.mtx.Unlock()
-				i.content.Objects[0] = container.NewBorder(nil, nil, nil, nil, widget.NewLabel("Settings"))
-			}
-		}),
-	)
-	i.activeWindow = "home"
-	connection := container.NewHBox(widget.NewLabel("Status : "), widget.NewLabelWithData(connectionBinding))
-	peers := container.NewHBox(widget.NewLabel("Peers : "), widget.NewLabelWithData(peerCountBinding))
-	population := container.NewHBox(widget.NewLabel("Population : "), widget.NewLabelWithData(populationBinding))
-	i.content = container.NewGridWithColumns(1, container.NewVBox(connection, peers, population))
-	i.view.Objects[0] = container.NewBorder(toolbar, nil, nil, nil, i.content)
+		},
+	}
+	downloadCard := widget.NewCard("Download", "download content from swarm", dlForm)
+	i.content.Objects = []fyne.CanvasObject{container.NewBorder(nil, nil, nil, nil, container.NewScroll(container.NewGridWithColumns(1, infoCard, uploadCard, downloadCard)))}
+	i.content.Refresh()
 	return nil
 }
 
@@ -583,16 +528,10 @@ func (i *index) buyBatchDialog(depthStr, amountStr *string) fyne.CanvasObject {
 }
 
 func (i *index) refDialog(ref string) fyne.CanvasObject {
-	refButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+	refButton := widget.NewButtonWithIcon("   Copy    ", theme.ContentCopyIcon(), func() {
 		i.Window.Clipboard().SetContent(ref)
 	})
-	optionsForm := widget.NewForm()
-	optionsForm.Append(
-		"Reference",
-		container.NewBorder(nil, nil, nil, widget.NewLabel(shortenHashOrAddress(ref)), refButton),
-	)
-
-	return container.NewMax(optionsForm)
+	return container.NewMax(container.NewBorder(nil, nil, nil, refButton, widget.NewLabel(shortenHashOrAddress(ref))))
 }
 
 func (i *index) showProgressWithMessage(message string) {
@@ -607,7 +546,7 @@ func (i *index) hideProgress() {
 func (i *index) showError(err error) {
 	label := widget.NewLabel(err.Error())
 	label.Wrapping = fyne.TextWrapWord
-	d := dialog.NewCustom("Error", "OK", label, i.Window)
+	d := dialog.NewCustom("Error", "       Close       ", label, i.Window)
 	parentSize := i.Window.Canvas().Size()
 	d.Resize(fyne.NewSize(parentSize.Width*90/100, 0))
 	d.Show()
@@ -615,14 +554,14 @@ func (i *index) showError(err error) {
 
 func (i *index) showErrorWithAddr(addr common.Address, err error) {
 	addrStr := shortenHashOrAddress(addr.String())
-	addrCopyButton := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+	addrCopyButton := widget.NewButtonWithIcon("   Copy    ", theme.ContentCopyIcon(), func() {
 		i.Window.Clipboard().SetContent(addr.String())
 	})
 	header := container.NewHBox(widget.NewLabel(addrStr), addrCopyButton)
 	label := widget.NewLabel(err.Error())
 	label.Wrapping = fyne.TextWrapWord
 	content := container.NewBorder(header, label, nil, nil)
-	d := dialog.NewCustom("Error", "OK", content, i.Window)
+	d := dialog.NewCustom("Error", "       Close       ", content, i.Window)
 	parentSize := i.Window.Canvas().Size()
 	d.Resize(fyne.NewSize(parentSize.Width*90/100, 0))
 	d.Show()
